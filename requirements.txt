@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+neo4j
+pydantic[dotenv]
+httpx
+crewai
+google-generativeai
+black
+isort
+mypy
+pytest
+
+

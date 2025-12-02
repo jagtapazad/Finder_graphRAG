@@ -1,0 +1,828 @@
+# Smart Agentic Router – CrewAI Integration Plan
+
+## Overview
+
+This document outlines the integration of **CrewAI** for multi-agent orchestration and **Google Gemini** for intelligent query analysis and Cypher query generation in the Smart Agentic Router project.
+
+---
+
+## Architecture Changes
+
+### Before (Original Design)
+- Custom agent implementations
+- Manual orchestration logic
+- Simple heuristics-based routing
+
+### After (CrewAI + Gemini)
+- **CrewAI Agents**: QueryAnalyzer, KGQueryAgent, RoutingDecisionAgent, FeedbackCollector
+- **CrewAI Tasks**: Sequential workflow with proper handoffs
+- **Gemini Integration**: LLM-powered query understanding and Cypher generation
+- **Structured Outputs**: Type-safe agent communication
+
+---
+
+## Phase 0: Environment Setup
+
+### 0.1 Additional Dependencies
+
+```bash
+pip install crewai crewai-tools google-generativeai pydantic
+pip install rdflib gliner  # For future RDF/entity extraction
+```
+
+### 0.2 Updated `.env`
+
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+LOW_CONF_THRESHOLD=0.6
+
+# Gemini API
+GOOGLE_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-1.5-flash  # or gemini-1.5-pro
+
+# CrewAI Settings
+CREWAI_VERBOSE=True
+CREWAI_MEMORY=True
+```
+
+### 0.3 Updated Directory Structure
+
+```text
+smart_agentic_router/
+  backend/
+    app.py
+    config.py
+    crew/
+      agents.py           # CrewAI agent definitions
+      tasks.py            # CrewAI task definitions
+      crew_manager.py     # Main crew orchestration
+      tools/
+        neo4j_tool.py     # Custom Neo4j query tool
+        gemini_tool.py    # Gemini query generation tool
+    kg/
+      client.py
+      queries.py
+      seed_data.cypher
+      schema.cypher
+      gemini_query_builder.py  # Gemini-powered Cypher generation
+    models/
+      schemas.py
+      domain.py
+      crew_outputs.py     # Pydantic models for crew outputs
+    api/
+      routes/
+        routing.py
+        feedback.py
+        agents.py
+  tests/
+    test_crew_workflow.py
+    test_gemini_integration.py
+```
+
+---
+
+## Phase 1: Gemini Integration for Query Understanding
+
+### 1.1 Gemini Client Setup
+
+`backend/kg/gemini_query_builder.py`:
+
+```python
+import google.generativeai as genai
+from typing import Dict, Any
+from ..config import settings
+import json
+
+genai.configure(api_key=settings.google_api_key)
+
+class GeminiQueryBuilder:
+    def __init__(self):
+        self.model = genai.GenerativeModel(settings.gemini_model)
+    
+    def analyze_user_query(self, query_text: str) -> Dict[str, Any]:
+        """
+        Use Gemini to extract structured information from user query
+        """
+        prompt = f"""
+        Analyze the following user query and extract structured information.
+        Return ONLY a valid JSON object with these fields:
+        - task_type: one of [WebSearchTask, CodeDebuggingTask, SummarizationTask, VisualizationTask]
+        - complexity: float between 0.0 and 1.0
+        - domain: one of [technical, general, legal, medical, financial]
+        - output_format: string describing expected output format (or null)
+        - key_entities: list of important entities/keywords
+        - intent: brief description of what user wants to accomplish
+        
+        User Query: "{query_text}"
+        
+        JSON Response:
+        """
+        
+        response = self.model.generate_content(prompt)
+        result = json.loads(response.text.strip())
+        return result
+    
+    def generate_cypher_query(
+        self, 
+        task_type: str, 
+        complexity: float,
+        domain: str,
+        context: str = ""
+    ) -> str:
+        """
+        Use Gemini to generate optimized Cypher queries for Neo4j
+        """
+        prompt = f"""
+        You are a Neo4j Cypher query expert. Generate an optimized Cypher query for the following:
+        
+        Task Type: {task_type}
+        Complexity Level: {complexity}
+        Domain: {domain}
+        Additional Context: {context}
+        
+        Graph Schema:
+        - Nodes: Agent, SpecializedAgent, TaskType, Capability, RoutingDecision, Query
+        - Relationships: HAS_CAPABILITY, REQUIRES_CAPABILITY, FALLBACK_AGENT, SIMILAR_TO, ROUTED_TO
+        
+        Agent Properties: name, capabilityLevel, domainExpertise, inputFormat, outputFormat
+        
+        Goal: Find the best agents that match the task requirements, ranked by:
+        1. Capability match (must have required capabilities)
+        2. Domain expertise alignment
+        3. Capability level (higher is better)
+        4. Historical performance (if available)
+        
+        Return ONLY the Cypher query, no explanations:
+        """
+        
+        response = self.model.generate_content(prompt)
+        cypher = response.text.strip()
+        # Remove markdown code blocks if present
+        cypher = cypher.replace("```cypher", "").replace("```", "").strip()
+        return cypher
+    
+    def refine_cypher_with_error(self, original_query: str, error_msg: str) -> str:
+        """
+        Use Gemini to fix Cypher queries that resulted in errors
+        """
+        prompt = f"""
+        The following Cypher query produced an error. Please fix it.
+        
+        Original Query:
+        {original_query}
+        
+        Error Message:
+        {error_msg}
+        
+        Return ONLY the corrected Cypher query:
+        """
+        
+        response = self.model.generate_content(prompt)
+        cypher = response.text.strip()
+        cypher = cypher.replace("```cypher", "").replace("```", "").strip()
+        return cypher
+```
+
+### 1.2 Configuration Update
+
+`backend/config.py`:
+
+```python
+from pydantic import BaseSettings
+
+class Settings(BaseSettings):
+    # Neo4j
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
+    
+    # Routing
+    low_conf_threshold: float = 0.6
+    
+    # Gemini
+    google_api_key: str
+    gemini_model: str = "gemini-1.5-flash"
+    
+    # CrewAI
+    crewai_verbose: bool = True
+    crewai_memory: bool = True
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+```
+
+---
+
+## Phase 2: CrewAI Agent Definitions
+
+### 2.1 Pydantic Output Models
+
+`backend/models/crew_outputs.py`:
+
+```python
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
+
+class AnalyzedQueryOutput(BaseModel):
+    """Output from QueryAnalyzer Agent"""
+    raw_text: str
+    task_type: str
+    complexity: float = Field(ge=0.0, le=1.0)
+    domain: str
+    output_format: Optional[str] = None
+    key_entities: List[str] = []
+    intent: str
+
+class AgentCandidate(BaseModel):
+    """Individual agent candidate with score"""
+    name: str
+    capability_level: float
+    domain_expertise: str
+    score: float
+    reasoning: str
+
+class KGQueryOutput(BaseModel):
+    """Output from KGQuery Agent"""
+    cypher_query: str
+    candidates: List[AgentCandidate]
+    execution_time_ms: float
+
+class RoutingDecisionOutput(BaseModel):
+    """Output from RoutingDecision Agent"""
+    routing_decision_id: str
+    chosen_agent: str
+    confidence: float
+    fallback_used: bool = False
+    rationale: Dict[str, Any]
+
+class FeedbackOutput(BaseModel):
+    """Output from FeedbackCollector Agent"""
+    routing_decision_id: str
+    outcome: str
+    agent_stats_updated: bool
+    message: str
+```
+
+### 2.2 Custom CrewAI Tools
+
+`backend/crew/tools/neo4j_tool.py`:
+
+```python
+from crewai_tools import BaseTool
+from typing import Type, Any
+from pydantic import BaseModel, Field
+from ...kg.client import get_driver
+import time
+
+class Neo4jQueryInput(BaseModel):
+    """Input for Neo4j query tool"""
+    cypher_query: str = Field(..., description="The Cypher query to execute")
+    parameters: dict = Field(default_factory=dict, description="Query parameters")
+
+class Neo4jQueryTool(BaseTool):
+    name: str = "Neo4j Query Tool"
+    description: str = "Executes Cypher queries against the Neo4j knowledge graph"
+    args_schema: Type[BaseModel] = Neo4jQueryInput
+    
+    def _run(self, cypher_query: str, parameters: dict = None) -> Any:
+        driver = get_driver()
+        start_time = time.time()
+        
+        try:
+            with driver.session() as session:
+                result = session.run(cypher_query, parameters or {})
+                records = [dict(record) for record in result]
+                
+            execution_time = (time.time() - start_time) * 1000
+            
+            return {
+                "success": True,
+                "records": records,
+                "execution_time_ms": execution_time,
+                "count": len(records)
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "execution_time_ms": (time.time() - start_time) * 1000
+            }
+```
+
+`backend/crew/tools/gemini_tool.py`:
+
+```python
+from crewai_tools import BaseTool
+from typing import Type
+from pydantic import BaseModel, Field
+from ...kg.gemini_query_builder import GeminiQueryBuilder
+
+class GeminiAnalysisInput(BaseModel):
+    """Input for Gemini analysis tool"""
+    query_text: str = Field(..., description="The user query to analyze")
+
+class GeminiQueryGenerationInput(BaseModel):
+    """Input for Gemini Cypher generation tool"""
+    task_type: str = Field(..., description="The task type")
+    complexity: float = Field(..., description="Complexity level 0.0-1.0")
+    domain: str = Field(..., description="Domain of expertise")
+    context: str = Field(default="", description="Additional context")
+
+class GeminiAnalysisTool(BaseTool):
+    name: str = "Gemini Query Analysis"
+    description: str = "Uses Gemini to analyze and extract structured info from user queries"
+    args_schema: Type[BaseModel] = GeminiAnalysisInput
+    
+    def __init__(self):
+        super().__init__()
+        self.gemini = GeminiQueryBuilder()
+    
+    def _run(self, query_text: str) -> dict:
+        return self.gemini.analyze_user_query(query_text)
+
+class GeminiCypherGeneratorTool(BaseTool):
+    name: str = "Gemini Cypher Generator"
+    description: str = "Uses Gemini to generate optimized Cypher queries for Neo4j"
+    args_schema: Type[BaseModel] = GeminiQueryGenerationInput
+    
+    def __init__(self):
+        super().__init__()
+        self.gemini = GeminiQueryBuilder()
+    
+    def _run(self, task_type: str, complexity: float, domain: str, context: str = "") -> str:
+        return self.gemini.generate_cypher_query(task_type, complexity, domain, context)
+```
+
+### 2.3 CrewAI Agent Definitions
+
+`backend/crew/agents.py`:
+
+```python
+from crewai import Agent
+from .tools.neo4j_tool import Neo4jQueryTool
+from .tools.gemini_tool import GeminiAnalysisTool, GeminiCypherGeneratorTool
+from ..config import settings
+
+def create_query_analyzer_agent() -> Agent:
+    """
+    Analyzes user queries using Gemini to extract structured information
+    """
+    return Agent(
+        role="Query Analyzer",
+        goal="Extract structured information from user queries including task type, complexity, domain, and intent",
+        backstory="""You are an expert at understanding user intent and extracting 
+        structured information from natural language queries. You use advanced LLM 
+        capabilities to identify task types, complexity levels, and domain requirements.""",
+        tools=[GeminiAnalysisTool()],
+        verbose=settings.crewai_verbose,
+        allow_delegation=False
+    )
+
+def create_kg_query_agent() -> Agent:
+    """
+    Generates and executes Cypher queries using Gemini and Neo4j
+    """
+    return Agent(
+        role="Knowledge Graph Query Specialist",
+        goal="Generate optimized Cypher queries and retrieve the best agent candidates from Neo4j",
+        backstory="""You are a Neo4j expert who generates efficient Cypher queries 
+        using LLM assistance. You understand graph traversal patterns and can optimize 
+        queries for agent selection based on capabilities, domain expertise, and 
+        historical performance.""",
+        tools=[GeminiCypherGeneratorTool(), Neo4jQueryTool()],
+        verbose=settings.crewai_verbose,
+        allow_delegation=False
+    )
+
+def create_routing_decision_agent() -> Agent:
+    """
+    Makes final routing decisions with fallback logic
+    """
+    return Agent(
+        role="Routing Decision Maker",
+        goal="Select the optimal agent based on candidates, confidence scoring, and fallback logic",
+        backstory="""You are a decision-making expert who evaluates agent candidates 
+        and selects the best one for each query. You apply confidence thresholds, 
+        fallback strategies, and create explainable routing decisions.""",
+        tools=[Neo4jQueryTool()],
+        verbose=settings.crewai_verbose,
+        allow_delegation=False
+    )
+
+def create_feedback_collector_agent() -> Agent:
+    """
+    Collects feedback and updates agent performance metrics
+    """
+    return Agent(
+        role="Feedback Collector",
+        goal="Record routing outcomes and update agent performance statistics in the knowledge graph",
+        backstory="""You are responsible for the continuous improvement of the routing 
+        system. You collect feedback on routing decisions and update agent performance 
+        metrics to improve future routing accuracy.""",
+        tools=[Neo4jQueryTool()],
+        verbose=settings.crewai_verbose,
+        allow_delegation=False
+    )
+```
+
+---
+
+## Phase 3: CrewAI Task Definitions
+
+`backend/crew/tasks.py`:
+
+```python
+from crewai import Task
+from .agents import (
+    create_query_analyzer_agent,
+    create_kg_query_agent,
+    create_routing_decision_agent,
+    create_feedback_collector_agent
+)
+from ..models.crew_outputs import (
+    AnalyzedQueryOutput,
+    KGQueryOutput,
+    RoutingDecisionOutput,
+    FeedbackOutput
+)
+
+def create_query_analysis_task(query: str) -> Task:
+    """Task 1: Analyze the user query"""
+    return Task(
+        description=f"""
+        Analyze the following user query and extract structured information:
+        
+        Query: "{query}"
+        
+        You must:
+        1. Use the Gemini Query Analysis tool to extract task_type, complexity, domain, etc.
+        2. Validate the output structure
+        3. Return a complete AnalyzedQueryOutput
+        """,
+        agent=create_query_analyzer_agent(),
+        expected_output="A structured AnalyzedQueryOutput with task_type, complexity, domain, and intent",
+        output_pydantic=AnalyzedQueryOutput
+    )
+
+def create_kg_query_task() -> Task:
+    """Task 2: Query the knowledge graph for candidates"""
+    return Task(
+        description="""
+        Based on the analyzed query from the previous task:
+        
+        1. Use the Gemini Cypher Generator tool to create an optimized Cypher query
+        2. Execute the query using the Neo4j Query Tool
+        3. Score and rank the returned agent candidates
+        4. Return the top candidates with their scores and reasoning
+        
+        Consider:
+        - Capability level match
+        - Domain expertise alignment
+        - Historical performance (if available in the graph)
+        """,
+        agent=create_kg_query_agent(),
+        expected_output="A KGQueryOutput with the generated Cypher query and ranked agent candidates",
+        output_pydantic=KGQueryOutput,
+        context=[create_query_analysis_task("placeholder")]  # Will be set dynamically
+    )
+
+def create_routing_decision_task(low_conf_threshold: float = 0.6) -> Task:
+    """Task 3: Make the final routing decision"""
+    return Task(
+        description=f"""
+        Make the final routing decision based on the agent candidates:
+        
+        1. Evaluate the top candidate's confidence score
+        2. If confidence < {low_conf_threshold}, trigger fallback logic:
+           - Query Neo4j for the fallback agent
+           - Select the fallback agent instead
+        3. Create a RoutingDecision record in Neo4j
+        4. Generate explainable rationale for the decision
+        
+        Return a complete RoutingDecisionOutput with:
+        - routing_decision_id (from Neo4j)
+        - chosen_agent name
+        - confidence score
+        - whether fallback was used
+        - detailed rationale
+        """,
+        agent=create_routing_decision_agent(),
+        expected_output="A RoutingDecisionOutput with the chosen agent and detailed rationale",
+        output_pydantic=RoutingDecisionOutput,
+        context=[create_kg_query_task()]  # Will be set dynamically
+    )
+
+def create_feedback_task(routing_decision_id: str, success: bool) -> Task:
+    """Task 4: Record feedback and update metrics"""
+    return Task(
+        description=f"""
+        Record feedback for routing decision {routing_decision_id}:
+        
+        Outcome: {"SUCCESS" if success else "FAILURE"}
+        
+        1. Update the RoutingDecision node in Neo4j with the outcome
+        2. Update the agent's performance statistics:
+           - Increment successCount or failureCount
+           - Recalculate historicalAccuracy
+        3. Return a FeedbackOutput confirming the update
+        """,
+        agent=create_feedback_collector_agent(),
+        expected_output="A FeedbackOutput confirming the feedback was recorded",
+        output_pydantic=FeedbackOutput
+    )
+```
+
+---
+
+## Phase 4: Crew Orchestration
+
+`backend/crew/crew_manager.py`:
+
+```python
+from crewai import Crew, Process
+from .tasks import (
+    create_query_analysis_task,
+    create_kg_query_task,
+    create_routing_decision_task,
+    create_feedback_task
+)
+from .agents import (
+    create_query_analyzer_agent,
+    create_kg_query_agent,
+    create_routing_decision_agent,
+    create_feedback_collector_agent
+)
+from ..models.crew_outputs import RoutingDecisionOutput, FeedbackOutput
+from ..config import settings
+
+class RoutingCrew:
+    """Manages the routing workflow using CrewAI"""
+    
+    def __init__(self):
+        self.query_analyzer = create_query_analyzer_agent()
+        self.kg_query_agent = create_kg_query_agent()
+        self.routing_agent = create_routing_decision_agent()
+        self.feedback_agent = create_feedback_collector_agent()
+    
+    def route_query(self, query: str) -> RoutingDecisionOutput:
+        """Execute the routing workflow"""
+        
+        # Create tasks with proper context
+        analysis_task = create_query_analysis_task(query)
+        kg_task = create_kg_query_task()
+        kg_task.context = [analysis_task]
+        
+        decision_task = create_routing_decision_task(settings.low_conf_threshold)
+        decision_task.context = [kg_task]
+        
+        # Create crew with sequential process
+        crew = Crew(
+            agents=[self.query_analyzer, self.kg_query_agent, self.routing_agent],
+            tasks=[analysis_task, kg_task, decision_task],
+            process=Process.sequential,
+            verbose=settings.crewai_verbose,
+            memory=settings.crewai_memory
+        )
+        
+        # Execute the crew
+        result = crew.kickoff()
+        
+        # The result should be a RoutingDecisionOutput
+        return result.pydantic
+    
+    def record_feedback(self, routing_decision_id: str, success: bool) -> FeedbackOutput:
+        """Execute the feedback workflow"""
+        
+        feedback_task = create_feedback_task(routing_decision_id, success)
+        
+        crew = Crew(
+            agents=[self.feedback_agent],
+            tasks=[feedback_task],
+            process=Process.sequential,
+            verbose=settings.crewai_verbose
+        )
+        
+        result = crew.kickoff()
+        return result.pydantic
+
+# Singleton instance
+_routing_crew = None
+
+def get_routing_crew() -> RoutingCrew:
+    global _routing_crew
+    if _routing_crew is None:
+        _routing_crew = RoutingCrew()
+    return _routing_crew
+```
+
+---
+
+## Phase 5: Updated FastAPI Routes
+
+`backend/api/routes/routing.py`:
+
+```python
+from fastapi import APIRouter, HTTPException
+from ...models.schemas import RouteRequest, RoutingResult
+from ...crew.crew_manager import get_routing_crew
+
+router = APIRouter()
+
+@router.post("/", response_model=RoutingResult)
+def route(route_request: RouteRequest):
+    """
+    Route a user query using the CrewAI-powered routing system
+    """
+    try:
+        crew = get_routing_crew()
+        result = crew.route_query(route_request.query)
+        
+        # Convert CrewAI output to API response
+        return RoutingResult(
+            routing_decision_id=result.routing_decision_id,
+            chosen_agent=result.chosen_agent,
+            confidence=result.confidence,
+            rationale=result.rationale
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Routing failed: {str(e)}")
+```
+
+`backend/api/routes/feedback.py`:
+
+```python
+from fastapi import APIRouter, HTTPException
+from ...models.schemas import FeedbackRequest
+from ...crew.crew_manager import get_routing_crew
+
+router = APIRouter()
+
+@router.post("/")
+def submit_feedback(feedback: FeedbackRequest):
+    """
+    Submit feedback for a routing decision
+    """
+    try:
+        crew = get_routing_crew()
+        result = crew.record_feedback(
+            feedback.routing_decision_id,
+            feedback.success
+        )
+        
+        return {
+            "status": "ok",
+            "message": result.message,
+            "agent_stats_updated": result.agent_stats_updated
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Feedback recording failed: {str(e)}")
+```
+
+---
+
+## Phase 6: Testing Strategy
+
+### 6.1 Unit Tests
+
+`tests/test_gemini_integration.py`:
+
+```python
+import pytest
+from backend.kg.gemini_query_builder import GeminiQueryBuilder
+
+@pytest.fixture
+def gemini_builder():
+    return GeminiQueryBuilder()
+
+def test_analyze_user_query(gemini_builder):
+    query = "Debug this Python error in my Flask application"
+    result = gemini_builder.analyze_user_query(query)
+    
+    assert result["task_type"] == "CodeDebuggingTask"
+    assert result["domain"] == "technical"
+    assert 0.0 <= result["complexity"] <= 1.0
+
+def test_generate_cypher_query(gemini_builder):
+    cypher = gemini_builder.generate_cypher_query(
+        task_type="CodeDebuggingTask",
+        complexity=0.7,
+        domain="technical"
+    )
+    
+    assert "MATCH" in cypher
+    assert "Agent" in cypher or "agent" in cypher
+```
+
+### 6.2 Integration Tests
+
+`tests/test_crew_workflow.py`:
+
+```python
+import pytest
+from backend.crew.crew_manager import RoutingCrew
+
+@pytest.fixture
+def crew():
+    return RoutingCrew()
+
+def test_full_routing_workflow(crew):
+    query = "Find the latest research on LLM pruning"
+    result = crew.route_query(query)
+    
+    assert result.chosen_agent in [
+        "WebSearchAgent",
+        "PerplexityFallbackAgent"
+    ]
+    assert 0.0 <= result.confidence <= 1.0
+    assert result.routing_decision_id is not None
+
+def test_feedback_workflow(crew):
+    # First route a query
+    query = "Debug this Python code"
+    routing_result = crew.route_query(query)
+    
+    # Then submit feedback
+    feedback_result = crew.record_feedback(
+        routing_result.routing_decision_id,
+        success=True
+    )
+    
+    assert feedback_result.agent_stats_updated is True
+    assert feedback_result.outcome == "SUCCESS"
+```
+
+---
+
+## Phase 7: Timeline (Updated 4-Week Plan)
+
+### Week 1: Foundation + Gemini
+- Set up CrewAI and Gemini dependencies
+- Implement `GeminiQueryBuilder`
+- Test Gemini query analysis and Cypher generation
+- Create Neo4j schema and seed data (unchanged)
+
+### Week 2: CrewAI Agents + Tools
+- Implement custom CrewAI tools (Neo4j, Gemini)
+- Define all 4 agents with proper roles and backstories
+- Create Pydantic output models
+- Unit test each tool and agent individually
+
+### Week 3: Tasks + Orchestration
+- Implement all CrewAI tasks with proper context
+- Build `RoutingCrew` orchestration
+- Integrate with FastAPI routes
+- End-to-end testing with sample queries
+
+### Week 4: Polish + Demo
+- Add error handling and retry logic
+- Implement metrics and logging
+- Create demo scenarios with explanations
+- Prepare visualization (Neo4j Bloom)
+- Record demo video showing:
+  - Query analysis by Gemini
+  - Dynamic Cypher generation
+  - Agent selection with rationale
+  - Feedback loop and improvement
+
+---
+
+## Key Advantages of This Approach
+
+1. **LLM-Powered Intelligence**: Gemini handles complex query understanding and Cypher generation
+2. **Proper Orchestration**: CrewAI manages agent collaboration with built-in memory
+3. **Type Safety**: Pydantic models ensure structured outputs between agents
+4. **Explainability**: Each agent documents its reasoning in the output
+5. **Flexibility**: Easy to add new agents or modify workflows
+6. **Testability**: Each component can be tested independently
+
+---
+
+## Demo Script Example
+
+```python
+# Example: Full workflow demonstration
+from backend.crew.crew_manager import get_routing_crew
+
+crew = get_routing_crew()
+
+# Scenario 1: Web search
+result1 = crew.route_query("Find the latest research on LLM pruning")
+print(f"Routed to: {result1.chosen_agent}")
+print(f"Confidence: {result1.confidence}")
+print(f"Rationale: {result1.rationale}")
+
+# Scenario 2: Code debugging with fallback
+result2 = crew.route_query("Help me debug this obscure Haskell error")
+print(f"Fallback used: {result2.fallback_used}")
+
+# Scenario 3: Feedback loop
+crew.record_feedback(result1.routing_decision_id, success=True)
+```
+
+---
+
+This plan transforms the Smart Agentic Router into a production-ready system with proper agent orchestration and LLM-powered intelligence.

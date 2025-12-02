@@ -1,0 +1,848 @@
+Smart Agentic Router – Detailed Implementation Plan (LLM Extraction + CrewAI + Neo4j)
+
+This document is a detailed, structured roadmap for implementing the Smart Agentic Task Router with:
+
+- LLM-based extraction
+- Multi-agent orchestration using CrewAI
+- Neo4j as Knowledge Graph (Cypher)
+
+
+============================================================
+PHASE 0 – Python & Project Scaffolding (½–1 day)
+============================================================
+
+0.1 Create project & virtual env
+
+    mkdir smart_agentic_router
+    cd smart_agentic_router
+
+    python -m venv .venv
+    source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+    pip install fastapi uvicorn[standard] neo4j pydantic[dotenv] httpx
+    pip install crewai
+    pip install black isort mypy pytest
+
+(You’ll later add your LLM SDK, e.g. `pip install openai`.)
+
+
+0.2 Directory structure (updated for LLM + CrewAI)
+
+    smart_agentic_router/
+      backend/
+        app.py
+        config.py
+        deps.py
+        kg/
+          client.py
+          queries.py
+          seed_data.cypher
+          schema.cypher
+        extraction/
+          llm_extractor.py
+          prompt_templates.py
+        crew/
+          agents.py         # CrewAI Agent definitions
+          crew_config.py    # Crew definition / orchestration
+        models/
+          schemas.py        # Pydantic models
+          domain.py         # Internal Python dataclasses
+        api/
+          routes/
+            routing.py      # /routing endpoint
+            feedback.py     # /feedback endpoint
+            agents.py       # /agents debug listing
+      tests/
+        test_routing.py
+        test_extraction.py
+      docs/
+        graph_schema.md
+        roadmap.md
+      .env
+
+
+0.3 Config management (FastAPI-friendly)
+
+backend/config.py:
+
+    from pydantic import BaseSettings
+
+    class Settings(BaseSettings):
+        neo4j_uri: str = "bolt://localhost:7687"
+        neo4j_user: str = "neo4j"
+        neo4j_password: str = "password"
+        low_conf_threshold: float = 0.6
+
+        llm_api_key: str | None = None   # for LLM extraction + execution
+        llm_model: str = "gpt-4o-mini"
+
+        class Config:
+            env_file = ".env"
+
+    settings = Settings()
+
+
+.env:
+
+    NEO4J_URI=bolt://localhost:7687
+    NEO4J_USER=neo4j
+    NEO4J_PASSWORD=password
+    LOW_CONF_THRESHOLD=0.6
+
+    LLM_API_KEY=sk-...
+    LLM_MODEL=gpt-4o-mini
+
+
+============================================================
+PHASE 1 – Neo4j Setup & Backend Connection (1 day)
+============================================================
+
+1.1 Run Neo4j locally
+
+Via Docker:
+
+    docker run       -e NEO4J_AUTH=neo4j/password       -p 7474:7474 -p 7687:7687       neo4j:5
+
+Or Neo4j Desktop (create DB with same credentials).
+
+
+1.2 Basic connection wrapper
+
+backend/kg/client.py:
+
+    from neo4j import GraphDatabase
+    from ..config import settings
+
+    _driver = None
+
+    def get_driver():
+        global _driver
+        if _driver is None:
+            _driver = GraphDatabase.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_user, settings.neo4j_password),
+            )
+        return _driver
+
+    def close_driver():
+        global _driver
+        if _driver is not None:
+            _driver.close()
+            _driver = None
+
+
+1.3 Integrate with FastAPI lifecycle
+
+backend/deps.py:
+
+    from neo4j import Driver
+    from .kg.client import get_driver
+
+    def get_neo4j_driver() -> Driver:
+        return get_driver()
+
+
+backend/app.py:
+
+    from fastapi import FastAPI
+    from .kg.client import get_driver, close_driver
+    from .api.routes import routing, feedback, agents
+
+    app = FastAPI(title="Smart Agentic Router")
+
+    @app.on_event("startup")
+    def on_startup():
+        get_driver()
+
+    @app.on_event("shutdown")
+    def on_shutdown():
+        close_driver()
+
+    app.include_router(routing.router, prefix="/routing", tags=["routing"])
+    app.include_router(feedback.router, prefix="/feedback", tags=["feedback"])
+    app.include_router(agents.router, prefix="/agents", tags=["agents"])
+
+
+Run dev server:
+
+    uvicorn backend.app:app --reload
+
+
+============================================================
+PHASE 2 – Graph Schema in Neo4j (1 day)
+============================================================
+
+2.1 Decide labels & relationships
+
+Document in docs/graph_schema.md:
+
+Node labels:
+
+- :Agent, :SpecializedAgent, :RouterAgent
+- :TaskType, :Capability
+- :Query, :RoutingDecision
+
+Relationships:
+
+- (:Agent)-[:HAS_CAPABILITY]->(:Capability)
+- (:TaskType)-[:REQUIRES_CAPABILITY]->(:Capability)
+- (:Agent)-[:FALLBACK_AGENT]->(:Agent)
+- (:Agent)-[:SIMILAR_TO]->(:Agent)
+- (:RoutingDecision)-[:SOURCE_QUERY]->(:Query)
+- (:RoutingDecision)-[:ROUTED_TO]->(:Agent)
+- (:Agent)-[:SUCCESSFULLY_HANDLED]->(:TaskType) (optional)
+
+
+2.2 Create constraints & indexes
+
+backend/kg/schema.cypher:
+
+    // Unique constraints
+    CREATE CONSTRAINT agent_name_unique IF NOT EXISTS
+    FOR (a:Agent)
+    REQUIRE a.name IS UNIQUE;
+
+    CREATE CONSTRAINT capability_name_unique IF NOT EXISTS
+    FOR (c:Capability)
+    REQUIRE c.name IS UNIQUE;
+
+    CREATE CONSTRAINT tasktype_name_unique IF NOT EXISTS
+    FOR (t:TaskType)
+    REQUIRE t.name IS UNIQUE;
+
+    // Indexes for faster lookup
+    CREATE INDEX query_text_index IF NOT EXISTS
+    FOR (q:Query)
+    ON (q.text);
+
+    CREATE INDEX routing_timestamp_index IF NOT EXISTS
+    FOR (rd:RoutingDecision)
+    ON (rd.timestamp);
+
+
+Apply this once with cypher-shell or a helper script.
+
+
+============================================================
+PHASE 3 – Design Sample Dataset (1 day)
+============================================================
+
+3.1 Design your mini world in docs/graph_schema.md
+
+Add tables describing:
+
+- Agents (name, capabilityLevel, domainExpertise, fallback)
+- Capabilities
+- Task types and their required capabilities
+- A few sample user queries and “ideal” routing outcomes
+
+
+Example agents table:
+
+    Agent name              Level  Domain    Capabilities                                Fallback
+    ---------------------------------------------------------------------------------------------
+    WebSearchAgent          0.9    general   WebSearching, FactRetrieval                 PerplexityFallback
+    CodeAnalysisAgent       0.85   technical CodeUnderstanding, DebuggingAssistance      PerplexityFallback
+    SummarizationAgent      0.83   general   DocumentSummarization                       WebSearchAgent
+    DataVisualizationAgent  0.8    technical DataVisualization                           SummarizationAgent
+    PerplexityFallbackAgent 0.8    general   GeneralKnowledge, WebSearching, FactRetrieval  (none)
+
+TaskTypes:
+
+- WebSearchTask      -> WebSearching
+- CodeDebuggingTask  -> CodeUnderstanding, DebuggingAssistance
+- SummarizationTask  -> DocumentSummarization
+- VisualizationTask  -> DataVisualization
+
+
+============================================================
+PHASE 4 – Seed Script for Neo4j (1–2 days)
+============================================================
+
+4.1 Write seed_data.cypher
+
+backend/kg/seed_data.cypher:
+
+    // 1. Clean DB
+    MATCH (n) DETACH DELETE n;
+
+    // 2. Capabilities
+    CREATE (webCap:Capability {name: 'WebSearching'});
+    CREATE (factCap:Capability {name: 'FactRetrieval'});
+    CREATE (codeCap:Capability {name: 'CodeUnderstanding'});
+    CREATE (debugCap:Capability {name: 'DebuggingAssistance'});
+    CREATE (sumCap:Capability {name: 'DocumentSummarization'});
+    CREATE (vizCap:Capability {name: 'DataVisualization'});
+    CREATE (genCap:Capability {name: 'GeneralKnowledge'});
+
+    // 3. Agents
+    CREATE (web:SpecializedAgent:Agent {
+      name: 'WebSearchAgent',
+      capabilityLevel: 0.9,
+      inputFormat: 'text',
+      outputFormat: 'structured_results',
+      domainExpertise: 'general'
+    });
+
+    // ... other agents similarly ...
+
+    // 4. HAS_CAPABILITY relationships
+    MATCH (web:Agent {name: 'WebSearchAgent'}), (webCap:Capability {name: 'WebSearching'})
+    CREATE (web)-[:HAS_CAPABILITY]->(webCap);
+
+    MATCH (web),(factCap:Capability {name: 'FactRetrieval'})
+    CREATE (web)-[:HAS_CAPABILITY]->(factCap);
+
+    // etc for all agents + capabilities...
+
+    // 5. TaskTypes
+    CREATE (webTask:TaskType {name: 'WebSearchTask', complexityLevel: 0.3});
+    CREATE (codeDebugTask:TaskType {name: 'CodeDebuggingTask', complexityLevel: 0.8});
+
+    MATCH (webTask),(webCap) CREATE (webTask)-[:REQUIRES_CAPABILITY]->(webCap);
+    MATCH (codeDebugTask),(codeCap) CREATE (codeDebugTask)-[:REQUIRES_CAPABILITY]->(codeCap);
+    MATCH (codeDebugTask),(debugCap) CREATE (codeDebugTask)-[:REQUIRES_CAPABILITY]->(debugCap);
+
+    // 6. Fallbacks
+    MATCH (web:Agent {name:'WebSearchAgent'}),
+          (perp:Agent {name:'PerplexityFallbackAgent'})
+    CREATE (web)-[:FALLBACK_AGENT]->(perp);
+
+    // 7. Sample RoutingDecision
+    CREATE (q1:Query {text: 'Find latest LLM pruning research'});
+    CREATE (rd1:RoutingDecision {timestamp: datetime(), confidence: 0.82, outcome: 'SUCCESS'});
+
+    MATCH (web),(q1)
+    CREATE (rd1)-[:SOURCE_QUERY]->(q1);
+    CREATE (rd1)-[:ROUTED_TO]->(web);
+
+
+4.2 Tiny Python helper to run seed
+
+backend/kg/seed.py:
+
+    from .client import get_driver
+
+    def run_seed_script():
+        driver = get_driver()
+        with open("backend/kg/seed_data.cypher") as f:
+            cypher = f.read()
+        with driver.session() as session:
+            for stmt in cypher.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    session.run(stmt)
+
+    if __name__ == "__main__":
+        run_seed_script()
+
+
+Run:
+
+    python -m backend.kg.seed
+
+
+============================================================
+PHASE 5 – KG Access Layer in Python (1–2 days)
+============================================================
+
+5.1 Domain models
+
+backend/models/domain.py:
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class Agent:
+        name: str
+        capability_level: float
+        domain_expertise: str
+        input_format: str
+        output_format: str
+
+    @dataclass
+    class RoutingDecision:
+        id: str
+        confidence: float
+        outcome: str
+
+
+5.2 Query helpers
+
+backend/kg/queries.py:
+
+    from typing import List
+    from neo4j import Session
+    from .client import get_driver
+    from ..models.domain import Agent
+
+    def _session() -> Session:
+        return get_driver().session()
+
+    def get_agents_by_task_type(task_type_name: str) -> List[Agent]:
+        cypher = """
+        MATCH (tt:TaskType {name: $taskType})-[:REQUIRES_CAPABILITY]->(cap:Capability),
+              (agent:Agent)-[:HAS_CAPABILITY]->(cap)
+        WITH DISTINCT agent
+        RETURN agent
+        """
+        with _session() as session:
+            result = session.run(cypher, taskType=task_type_name)
+            agents: List[Agent] = []
+            for record in result:
+                node = record["agent"]
+                agents.append(
+                    Agent(
+                        name=node["name"],
+                        capability_level=node.get("capabilityLevel", 0.5),
+                        domain_expertise=node.get("domainExpertise", "general"),
+                        input_format=node.get("inputFormat", "text"),
+                        output_format=node.get("outputFormat", "text"),
+                    )
+                )
+            return agents
+
+    def get_fallback_agent(agent_name: str) -> Agent | None:
+        cypher = """
+        MATCH (a:Agent {name: $name})-[:FALLBACK_AGENT]->(fb:Agent)
+        RETURN fb LIMIT 1
+        """
+        with _session() as session:
+            record = session.run(cypher, name=agent_name).single()
+            if not record:
+                return None
+            node = record["fb"]
+            return Agent(
+                name=node["name"],
+                capability_level=node.get("capabilityLevel", 0.5),
+                domain_expertise=node.get("domainExpertise", "general"),
+                input_format=node.get("inputFormat", "text"),
+                output_format=node.get("outputFormat", "text"),
+            )
+
+    def create_routing_decision(query_text: str, agent_name: str, confidence: float) -> str:
+        cypher = """
+        MERGE (agent:Agent {name: $agentName})
+        CREATE (q:Query {text: $queryText})
+        CREATE (rd:RoutingDecision {
+            id: randomUUID(),
+            timestamp: datetime(),
+            confidence: $confidence,
+            outcome: 'PENDING'
+        })
+        CREATE (rd)-[:SOURCE_QUERY]->(q)
+        CREATE (rd)-[:ROUTED_TO]->(agent)
+        RETURN rd.id AS id
+        """
+        with _session() as session:
+            record = session.run(
+                cypher,
+                agentName=agent_name,
+                queryText=query_text,
+                confidence=confidence,
+            ).single()
+            return record["id"]
+
+    def update_routing_outcome(rd_id: str, outcome: str):
+        cypher = """
+        MATCH (rd:RoutingDecision {id: $id})
+        SET rd.outcome = $outcome
+        """
+        with _session() as session:
+            session.run(cypher, id=rd_id, outcome=outcome)
+
+
+============================================================
+PHASE 6 – LLM-Based Query Analyzer (2–3 days)
+============================================================
+
+6.1 Pydantic schemas
+
+backend/models/schemas.py:
+
+    from pydantic import BaseModel
+
+    class RouteRequest(BaseModel):
+        query: str
+
+    class AnalyzedQuery(BaseModel):
+        raw_text: str
+        task_type: str
+        complexity: float
+        domain: str
+        output_format: str | None = None
+
+    class RoutingResult(BaseModel):
+        routing_decision_id: str
+        chosen_agent: str
+        confidence: float
+        rationale: dict
+
+    class FeedbackRequest(BaseModel):
+        routing_decision_id: str
+        success: bool
+
+
+6.2 Prompt templates for extraction
+
+backend/extraction/prompt_templates.py:
+
+    EXTRACTION_PROMPT_TEMPLATE = """
+    You are a task understanding assistant. Given a user query, output JSON with:
+    - task_type: one of ["WebSearchTask", "CodeDebuggingTask", "SummarizationTask", "VisualizationTask", "OtherTask"]
+    - complexity: float between 0.0 and 1.0
+    - domain: string like "technical", "general", "legal", etc.
+    - output_format: string or null
+    - free_text: the original user query
+
+    Respond with ONLY JSON, no extra text.
+
+    User query: "{query}"
+    """
+
+
+6.3 LLM extractor implementation
+
+backend/extraction/llm_extractor.py:
+
+    import json
+    from typing import Any
+    from ..config import settings
+    from ..models.schemas import AnalyzedQuery
+    from .prompt_templates import EXTRACTION_PROMPT_TEMPLATE
+    import httpx  # or your LLM SDK
+
+    class ExtractionError(Exception):
+        pass
+
+    def call_llm(prompt: str) -> str:
+        # Replace this with real LLM call (OpenAI or other)
+        # Example sketch with httpx (pseudo):
+        # headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+        # resp = httpx.post("https://api.your-llm.com/v1/chat/completions", ...)
+        # return resp.json()["choices"][0]["message"]["content"]
+        raise NotImplementedError
+
+    def extract_query(query_text: str) -> AnalyzedQuery:
+        prompt = EXTRACTION_PROMPT_TEMPLATE.format(query=query_text)
+        raw_response = call_llm(prompt)
+
+        try:
+            data: dict[str, Any] = json.loads(raw_response)
+        except json.JSONDecodeError as e:
+            raise ExtractionError(f"Invalid JSON from LLM: {e}")
+
+        return AnalyzedQuery(
+            raw_text=query_text,
+            task_type=data.get("task_type", "WebSearchTask"),
+            complexity=float(data.get("complexity", 0.5)),
+            domain=data.get("domain", "general"),
+            output_format=data.get("output_format"),
+        )
+
+
+============================================================
+PHASE 7 – KGQueryAgent & Scoring (2–3 days)
+============================================================
+
+backend/agents/kg_query_agent.py:
+
+    from typing import List, Tuple
+    from ..models.schemas import AnalyzedQuery
+    from ..models.domain import Agent
+    from ..kg.queries import get_agents_by_task_type
+
+    def score_agent(agent: Agent, analyzed: AnalyzedQuery, historical_score: float = 0.5) -> float:
+        domain_match = 1.0 if agent.domain_expertise in (analyzed.domain, "general") else 0.7
+        return 0.5 * agent.capability_level + 0.3 * historical_score + 0.2 * domain_match
+
+    def query_kg_for_agents(analyzed: AnalyzedQuery) -> List[Tuple[Agent, float]]:
+        candidates = get_agents_by_task_type(analyzed.task_type)
+        scored = [(agent, score_agent(agent, analyzed, 0.5)) for agent in candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+
+============================================================
+PHASE 8 – CrewAI-Based Routing & Execution (2–4 days)
+============================================================
+
+8.1 Define CrewAI agents
+
+backend/crew/agents.py:
+
+    from crewai import Agent
+
+    extractor_agent = Agent(
+        role="Extractor",
+        goal="Parse user query into structured task metadata",
+        backstory="You specialize in understanding user intents and mapping them to task types.",
+    )
+
+    kg_query_agent = Agent(
+        role="KGQuerier",
+        goal="Query the knowledge graph to find suitable agents",
+        backstory="You know how to interact with Neo4j and read agent capabilities.",
+    )
+
+    router_agent = Agent(
+        role="Router",
+        goal="Select the optimal specialized agent and decide fallback if needed",
+        backstory="You consider capabilities, domain fit, and historical performance.",
+    )
+
+    web_search_agent = Agent(
+        role="WebSearchAgent",
+        goal="Handle information retrieval and web search queries",
+    )
+
+    code_analysis_agent = Agent(
+        role="CodeAnalysisAgent",
+        goal="Analyze and debug code-related tasks",
+    )
+
+    summarization_agent = Agent(
+        role="SummarizationAgent",
+        goal="Summarize documents and text",
+    )
+
+    fallback_agent = Agent(
+        role="FallbackAgent",
+        goal="Provide a reasonable generic answer when no specialized agent fits",
+    )
+
+    feedback_agent = Agent(
+        role="FeedbackCollector",
+        goal="Collect user feedback and update agent performance stats in the KG",
+    )
+
+
+8.2 Define Crew & routing flow
+
+backend/crew/crew_config.py:
+
+    from crewai import Crew
+    from .agents import (
+        extractor_agent, kg_query_agent, router_agent,
+        web_search_agent, code_analysis_agent,
+        summarization_agent, fallback_agent, feedback_agent,
+    )
+    from ..extraction.llm_extractor import extract_query
+    from ..agents.kg_query_agent import query_kg_for_agents
+    from ..kg.queries import create_routing_decision, get_fallback_agent
+    from ..config import settings
+
+    router_crew = Crew(
+        name="SmartAgenticRouterCrew",
+        agents=[
+            extractor_agent,
+            kg_query_agent,
+            router_agent,
+            web_search_agent,
+            code_analysis_agent,
+            summarization_agent,
+            fallback_agent,
+            feedback_agent,
+        ],
+    )
+
+    def run_routing_flow(user_query: str):
+        # Step 1: Extraction (LLM)
+        analyzed = extract_query(user_query)
+
+        # Step 2: KG query
+        ranked = query_kg_for_agents(analyzed)
+
+        # Step 3: Routing decision
+        if not ranked:
+            chosen_name = "PerplexityFallbackAgent"
+            confidence = 0.5
+            candidates = []
+        else:
+            top_agent, top_score = ranked[0]
+            chosen_name = top_agent.name
+            confidence = top_score
+
+            if confidence < settings.low_conf_threshold:
+                fb = get_fallback_agent(chosen_name)
+                if fb:
+                    chosen_name = fb.name
+
+            candidates = [
+                {"name": agent.name, "score": score}
+                for agent, score in ranked[:3]
+            ]
+
+        rd_id = create_routing_decision(user_query, chosen_name, confidence)
+
+        # Step 4: Execution step (call appropriate LLM/tool based on chosen_name)
+        # For now, this can be a stub returning a placeholder response.
+
+        result_payload = {
+            "routing_decision_id": rd_id,
+            "chosen_agent": chosen_name,
+            "confidence": confidence,
+            "analyzed_query": analyzed,
+            "top_candidates": candidates,
+        }
+        return result_payload
+
+
+============================================================
+PHASE 9 – FeedbackCollector & Metrics (1–2 days)
+============================================================
+
+backend/agents/feedback_collector.py:
+
+    from ..kg.queries import update_routing_outcome, update_agent_stats
+
+    def record_feedback(routing_decision_id: str, agent_name: str, success: bool):
+        outcome = "SUCCESS" if success else "FAILURE"
+        update_routing_outcome(routing_decision_id, outcome)
+        update_agent_stats(agent_name, success)
+
+
+Extend backend/kg/queries.py with:
+
+    def update_agent_stats(agent_name: str, success: bool):
+        cypher = """
+        MATCH (a:Agent {name: $name})
+        SET a.successCount = coalesce(a.successCount, 0) + CASE WHEN $success THEN 1 ELSE 0 END,
+            a.failureCount = coalesce(a.failureCount, 0) + CASE WHEN $success THEN 0 ELSE 1 END,
+            a.historicalAccuracy =
+                toFloat(a.successCount) / (a.successCount + a.failureCount)
+        """
+        with _session() as session:
+            session.run(cypher, name=agent_name, success=success)
+
+
+============================================================
+PHASE 10 – FastAPI Routes & End-to-End Wiring (3–5 days)
+============================================================
+
+10.1 Routing API
+
+backend/api/routes/routing.py:
+
+    from fastapi import APIRouter
+    from ...models.schemas import RouteRequest, RoutingResult
+    from ...crew.crew_config import run_routing_flow
+
+    router = APIRouter()
+
+    @router.post("/", response_model=RoutingResult)
+    def route(route_request: RouteRequest):
+        result = run_routing_flow(route_request.query)
+        return RoutingResult(
+            routing_decision_id=result["routing_decision_id"],
+            chosen_agent=result["chosen_agent"],
+            confidence=result["confidence"],
+            rationale={
+                "analyzed_query": result["analyzed_query"].dict(),
+                "top_candidates": result["top_candidates"],
+            },
+        )
+
+
+10.2 Feedback API
+
+backend/api/routes/feedback.py:
+
+    from fastapi import APIRouter
+    from ...models.schemas import FeedbackRequest
+    from ...agents.feedback_collector import record_feedback
+
+    router = APIRouter()
+
+    @router.post("/")
+    def submit_feedback(feedback: FeedbackRequest):
+        # You may want to look up the agent_name from the RoutingDecision node.
+        # For now you can extend FeedbackRequest with agent_name if desired.
+        raise NotImplementedError
+
+
+10.3 Agents listing API (for demo/debug)
+
+backend/api/routes/agents.py:
+
+    from fastapi import APIRouter
+    from ...kg.queries import get_agents_by_task_type
+
+    router = APIRouter()
+
+    @router.get("/")
+    def list_agents(task_type: str | None = None):
+        if not task_type:
+            # TODO: implement list-all-agents query
+            return []
+        agents = get_agents_by_task_type(task_type)
+        return [a.__dict__ for a in agents]
+
+
+============================================================
+PHASE 11 – Metrics, Edge Cases, Polish (2–3 days)
+============================================================
+
+11.1 Metrics in Neo4j
+
+- Seed agents with successCount, failureCount, historicalAccuracy (0,0,0.5).
+- In scoring (query_kg_for_agents), load historicalAccuracy from each Agent node and use it instead of static 0.5.
+- Add optional endpoints to view stats, e.g. average success per agent.
+
+11.2 Edge case handling
+
+- If LLM extraction fails (invalid JSON): catch ExtractionError, either:
+  - default to WebSearchTask + general with low confidence,
+  - or return HTTP 400 with an error message.
+- If no candidates returned by KG: choose PerplexityFallbackAgent and log a warning.
+- If Neo4j is down: catch exceptions and return HTTP 503.
+- If execution LLM/tool fails: fall back to FallbackAgent and mark outcome as failure.
+
+11.3 Logging
+
+- Set up logging in a central place; log key actions:
+  - extraction results
+  - KG queries and counts
+  - routing decisions (query, chosen_agent, confidence)
+  - feedback updates and new historicalAccuracy values
+
+
+============================================================
+PHASE 12 – Timeline + What You Actually Build Each Week
+============================================================
+
+Week 1
+- Set up Python env, FastAPI skeleton.
+- Run Neo4j locally.
+- Implement client.py, schema.cypher, seed_data.cypher.
+- Seed and verify graph in Neo4j Browser.
+
+Week 2
+- Implement domain.py, schemas.py.
+- Implement kg/queries.py core functions.
+- Implement llm_extractor.py with prompt_templates.py.
+- Test extraction with various queries.
+
+Week 3
+- Implement kg_query_agent.py scoring v1.
+- Define CrewAI agents in crew/agents.py.
+- Implement run_routing_flow in crew/crew_config.py (extraction + KG + routing).
+- Manual tests of routing via a simple script or /routing endpoint (stubbed execution).
+
+Week 4
+- Implement execution behavior in run_routing_flow for each specialized agent using LLM/tools.
+- Integrate this with FastAPI /routing endpoint.
+- Start capturing RoutingDecision nodes with real user queries.
+
+Week 5
+- Implement feedback endpoint and FeedbackCollector.
+- Wire update_agent_stats and integrate historicalAccuracy into scoring.
+- Add logging, better error handling, and fallback logic for failures.
+
+Week 6
+- Optional: simple UI or rely on Swagger UI.
+- Add metrics/debug endpoints (e.g., /agents, /metrics).
+- Prepare demo flows showing: extraction, routing rationale, execution, feedback, and observable improvements over time.
+
+============================================================
+End of Implementation Plan.
