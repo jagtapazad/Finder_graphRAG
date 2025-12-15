@@ -6,11 +6,44 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/routing": "http://localhost:8000",
-      "/feedback": "http://localhost:8000",
-      "/agents": "http://localhost:8000"
-    }
-  }
+      "/routing": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+      "/feedback": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+      "/agents": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+      "/explanations": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+      "/visualization": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+      "/metrics": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path,
+      },
+    },
+  },
 });
 
 

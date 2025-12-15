@@ -59,8 +59,7 @@ export const TraversalTimeline: React.FC<Props> = ({
   ];
 
   return (
-    <div className="timeline-section">
-      <h3>Graph traversal & routing reasoning</h3>
+    <>
       <ol className="timeline">
         {steps.map((step, idx) => (
           <li key={idx} className="timeline-step">
@@ -73,7 +72,7 @@ export const TraversalTimeline: React.FC<Props> = ({
           </li>
         ))}
       </ol>
-    </div>
+    </>
   );
 };
 

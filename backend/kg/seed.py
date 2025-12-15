@@ -1,31 +1,46 @@
+import os
+from pathlib import Path
 from .client import get_driver
 
 
 def run_seed_script() -> None:
     driver = get_driver()
-    with open("backend/kg/seed_data.cypher", encoding="utf-8") as f:
-        cypher = f.read()
+    current_dir = Path(__file__).parent
     
-    # Remove comment lines and inline comments
+    schema_path = current_dir / "schema.cypher"
+    seed_path = current_dir / "seed_data.cypher"
+    
+    with open(schema_path, encoding="utf-8") as f:
+        schema_cypher = f.read()
+    
+    with open(seed_path, encoding="utf-8") as f:
+        seed_cypher = f.read()
+    
+    cypher = schema_cypher + "\n" + seed_cypher
+    
     lines = cypher.split("\n")
     cleaned_lines = []
     for line in lines:
-        # Remove inline comments (everything after //)
+        if line.strip().startswith("//"):
+            continue
         if "//" in line:
             line = line[: line.index("//")]
         line = line.strip()
-        # Skip empty lines and lines that are only whitespace
         if line:
             cleaned_lines.append(line)
     
-    # Rejoin and split by semicolon
     cleaned_cypher = "\n".join(cleaned_lines)
     
     with driver.session() as session:
-        for stmt in cleaned_cypher.split(";"):
+        statements = cleaned_cypher.split(";")
+        for stmt in statements:
             stmt = stmt.strip()
             if stmt:
-                session.run(stmt)
+                try:
+                    session.run(stmt)
+                except Exception as e:
+                    if "already exists" not in str(e).lower() and "already in use" not in str(e).lower():
+                        print(f"Warning: {e}")
 
 
 if __name__ == "__main__":

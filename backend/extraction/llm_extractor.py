@@ -13,12 +13,7 @@ class ExtractionError(Exception):
 
 
 def call_llm(prompt: str) -> str:
-    """
-    Calls Google Gemini LLM for query extraction.
-    """
     if not settings.llm_api_key:
-        # Fallback to simple heuristic JSON if no API key is set.
-        # This makes local dev easier before wiring a real model.
         fallback = {
             "task_type": "WebSearchTask",
             "complexity": 0.5,
@@ -28,28 +23,34 @@ def call_llm(prompt: str) -> str:
         }
         return json.dumps(fallback)
 
-    # Configure Gemini with API key
     genai.configure(api_key=settings.llm_api_key)
     
-    # Create model instance
-    model = genai.GenerativeModel(settings.llm_model)
+    model_name = settings.llm_model.replace("gemini/", "") if settings.llm_model.startswith("gemini/") else settings.llm_model
+    if not model_name.startswith("models/"):
+        model_name = f"models/{model_name}"
+    model = genai.GenerativeModel(model_name)
     
-    # Build the full prompt with system instruction
     full_prompt = f"You are a JSON-only task extraction model. {prompt}"
     
     try:
-        # Generate response
         response = model.generate_content(
             full_prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.3,  # Lower temperature for more consistent JSON output
+                temperature=0.3,
                 max_output_tokens=500,
+                response_mime_type="application/json",
             ),
         )
         
-        # Extract text from response
         if response.text:
-            return response.text.strip()
+            text = response.text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            return text.strip()
         else:
             raise ExtractionError("Empty response from Gemini")
             

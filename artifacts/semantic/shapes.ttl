@@ -1,0 +1,85 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/agentrouter#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# SHACL shapes for key classes used in the routing KG
+
+ex:AgentShape
+    a sh:NodeShape ;
+    sh:targetClass ex:Agent ;
+    sh:property [
+        sh:path ex:name ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:pattern "^[A-Za-z0-9]+$" ;
+    ] ;
+    sh:property [
+        sh:path ex:capabilityLevel ;
+        sh:datatype xsd:float ;
+        sh:minInclusive 0.0 ;
+        sh:maxInclusive 1.0 ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:domainExpertise ;
+        sh:in ("general" "technical" "medical" "legal" "research" "finance" "education" "content" "analytics" "development" "security" "automation" "media") ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:historicalAccuracy ;
+        sh:datatype xsd:float ;
+        sh:minInclusive 0.0 ;
+        sh:maxInclusive 1.0 ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:hasCapability ;
+        sh:minCount 1 ;
+        sh:maxCount 10 ;
+        sh:nodeKind sh:IRI ;
+        sh:class ex:Capability ;
+    ] ;
+    sh:property [
+        sh:path ex:hasFallbackAgent ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:class ex:Agent ;
+    ] .
+
+ex:RoutingDecisionShape
+    a sh:NodeShape ;
+    sh:targetClass ex:RoutingDecision ;
+    sh:property [
+        sh:path ex:id ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:confidence ;
+        sh:datatype xsd:float ;
+        sh:minInclusive 0.0 ;
+        sh:maxInclusive 1.0 ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:outcome ;
+        sh:in ("SUCCESS" "FAILURE" "PENDING") ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path ex:sourceQuery ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:class ex:Query ;
+    ] ;
+    sh:property [
+        sh:path ex:routedTo ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:class ex:Agent ;
+    ] .
+

@@ -1,0 +1,50 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <http://example.org/agentrouter#> .
+
+# Minimal ontology aligned to the Smart Agentic Router KG
+
+# Classes
+ex:Agent rdf:type owl:Class .
+ex:Capability rdf:type owl:Class .
+ex:TaskType rdf:type owl:Class .
+ex:Query rdf:type owl:Class .
+ex:RoutingDecision rdf:type owl:Class .
+
+# Disjointness constraints
+ex:Agent owl:disjointWith ex:Capability .
+ex:Agent owl:disjointWith ex:TaskType .
+ex:Capability owl:disjointWith ex:TaskType .
+ex:Query owl:disjointWith ex:RoutingDecision .
+
+# Object properties
+ex:hasCapability rdf:type owl:ObjectProperty ;
+    rdfs:domain ex:Agent ;
+    rdfs:range ex:Capability ;
+    rdfs:comment "Indicates an agent possesses a specific capability" .
+
+ex:requiresCapability rdf:type owl:ObjectProperty ;
+    rdfs:domain ex:TaskType ;
+    rdfs:range ex:Capability ;
+    rdfs:comment "Indicates a task type requires a specific capability" .
+
+ex:hasFallbackAgent rdf:type owl:ObjectProperty ;
+    rdfs:domain ex:Agent ;
+    rdfs:range ex:Agent ;
+    owl:inverseOf ex:isFallbackFor ;
+    rdfs:comment "Indicates a fallback agent relationship" .
+
+ex:sourceQuery rdf:type owl:ObjectProperty ;
+    rdfs:domain ex:RoutingDecision ;
+    rdfs:range ex:Query ;
+    rdfs:comment "Links a routing decision to its source query" .
+
+ex:routedTo rdf:type owl:ObjectProperty ;
+    rdfs:domain ex:RoutingDecision ;
+    rdfs:range ex:Agent ;
+    rdfs:comment "Indicates which agent was selected for routing" .
+
+# Equivalent property example
+ex:hasCapability owl:equivalentProperty ex:possessesCapability .
+

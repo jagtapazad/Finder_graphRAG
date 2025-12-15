@@ -31,19 +31,16 @@ router_crew = Crew(
 
 
 def run_routing_flow(user_query: str) -> dict:
-    # Step 1: Extraction (LLM)
     analyzed = extract_query(user_query)
-
-    # Step 2: KG query
     ranked = query_kg_for_agents(analyzed)
 
-    # Step 3: Routing decision
     if not ranked:
         chosen_name = "PerplexityFallbackAgent"
         confidence = 0.5
         candidates: list[dict] = []
+        tie_breaking_info = {}
     else:
-        top_agent, top_score = ranked[0]
+        top_agent, top_score, tie_breaking_info = ranked[0]
         chosen_name = top_agent.name
         confidence = top_score
 
@@ -51,17 +48,18 @@ def run_routing_flow(user_query: str) -> dict:
             fb = get_fallback_agent(chosen_name)
             if fb:
                 chosen_name = fb.name
+                confidence = max(confidence, 0.6)
 
         candidates = [
-            {"name": agent.name, "score": score}
-            for agent, score in ranked[:3]
+            {
+                "name": agent.name,
+                "score": score,
+                "tie_breaking": tie_info,
+            }
+            for agent, score, tie_info in ranked[:3]
         ]
 
     rd_id = create_routing_decision(user_query, chosen_name, confidence)
-
-    # Step 4: Execution step (call appropriate LLM/tool based on chosen_name)
-    # For now, this is a stub. You can branch on chosen_name to call
-    # web search, code analysis, summarization, etc.
 
     result_payload = {
         "routing_decision_id": rd_id,
@@ -69,6 +67,7 @@ def run_routing_flow(user_query: str) -> dict:
         "confidence": confidence,
         "analyzed_query": analyzed,
         "top_candidates": candidates,
+        "tie_breaking_info": tie_breaking_info,
     }
     return result_payload
 

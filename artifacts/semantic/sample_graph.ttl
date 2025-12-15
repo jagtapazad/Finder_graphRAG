@@ -1,0 +1,85 @@
+@prefix ex: <http://example.org/agentrouter#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Sample graph aligned to the Neo4j seed data
+ex:WebSearchAgent rdf:type ex:Agent ;
+    ex:name "WebSearchAgent" ;
+    ex:capabilityLevel 0.9 ;
+    ex:domainExpertise "general" ;
+    ex:historicalAccuracy 0.75 ;
+    ex:hasCapability ex:WebSearching ;
+    ex:hasCapability ex:FactRetrieval ;
+    ex:hasFallbackAgent ex:PerplexityFallbackAgent .
+
+ex:CodeAnalysisAgent rdf:type ex:Agent ;
+    ex:name "CodeAnalysisAgent" ;
+    ex:capabilityLevel 0.85 ;
+    ex:domainExpertise "technical" ;
+    ex:historicalAccuracy 0.5 ;
+    ex:hasCapability ex:CodeUnderstanding ;
+    ex:hasCapability ex:DebuggingAssistance .
+
+ex:SummarizationAgent rdf:type ex:Agent ;
+    ex:name "SummarizationAgent" ;
+    ex:capabilityLevel 0.83 ;
+    ex:domainExpertise "general" ;
+    ex:historicalAccuracy 0.5 ;
+    ex:hasCapability ex:DocumentSummarization .
+
+ex:DataVisualizationAgent rdf:type ex:Agent ;
+    ex:name "DataVisualizationAgent" ;
+    ex:capabilityLevel 0.8 ;
+    ex:domainExpertise "technical" ;
+    ex:historicalAccuracy 0.5 ;
+    ex:hasCapability ex:DataVisualization .
+
+ex:PerplexityFallbackAgent rdf:type ex:Agent ;
+    ex:name "PerplexityFallbackAgent" ;
+    ex:capabilityLevel 0.8 ;
+    ex:domainExpertise "general" ;
+    ex:historicalAccuracy 0.5 ;
+    ex:hasCapability ex:GeneralKnowledge .
+
+ex:WebSearchTask rdf:type ex:TaskType ;
+    ex:name "WebSearchTask" ;
+    ex:complexityLevel 0.3 ;
+    ex:requiresCapability ex:WebSearching .
+
+ex:CodeDebuggingTask rdf:type ex:TaskType ;
+    ex:name "CodeDebuggingTask" ;
+    ex:complexityLevel 0.8 ;
+    ex:requiresCapability ex:CodeUnderstanding ;
+    ex:requiresCapability ex:DebuggingAssistance .
+
+ex:SummarizationTask rdf:type ex:TaskType ;
+    ex:name "SummarizationTask" ;
+    ex:complexityLevel 0.5 ;
+    ex:requiresCapability ex:DocumentSummarization .
+
+ex:VisualizationTask rdf:type ex:TaskType ;
+    ex:name "VisualizationTask" ;
+    ex:complexityLevel 0.7 ;
+    ex:requiresCapability ex:DataVisualization .
+
+ex:Query1 rdf:type ex:Query ;
+    ex:text "Find latest LLM pruning research" .
+
+ex:RoutingDecision1 rdf:type ex:RoutingDecision ;
+    ex:id "rd-1" ;
+    ex:timestamp "2025-01-15T10:30:00Z"^^xsd:dateTime ;
+    ex:confidence 0.82 ;
+    ex:outcome "SUCCESS" ;
+    ex:sourceQuery ex:Query1 ;
+    ex:routedTo ex:WebSearchAgent .
+
+# Capabilities as first-class nodes
+ex:WebSearching rdf:type ex:Capability .
+ex:FactRetrieval rdf:type ex:Capability .
+ex:CodeUnderstanding rdf:type ex:Capability .
+ex:DebuggingAssistance rdf:type ex:Capability .
+ex:DocumentSummarization rdf:type ex:Capability .
+ex:DataVisualization rdf:type ex:Capability .
+ex:GeneralKnowledge rdf:type ex:Capability .
+
